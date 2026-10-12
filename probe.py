@@ -18,6 +18,7 @@ report = {'release': '0.1.35', 'platform': platform.platform(), 'machine': platf
 gui = None
 gui_log = None
 mount = work / 'mount'
+web_server = None
 
 def run(args, name, timeout=45):
     try:
@@ -65,9 +66,20 @@ try:
         args.append('--fresh-start')
     fixture = work / 'sample-project'
     fixture.mkdir(exist_ok=True)
-    (fixture / 'README.md').write_text('# Runtime observation fixture\n', encoding='utf-8')
+    (fixture / 'README.md').write_text('# Runtime observation fixture\n\nOriginal application, temporary sample project.\n', encoding='utf-8')
+    (fixture / 'main.js').write_text('export const greeting = "Hello";\n', encoding='utf-8')
+    (fixture / 'index.html').write_text('<!doctype html><html><head><title>Horizyn browser fixture</title></head><body><h1>Horizyn 0.1.35 browser fixture</h1><p id="context">A local page for observing the original browser.</p><button onclick="this.textContent=\'Clicked\'">Test button</button></body></html>', encoding='utf-8')
+    run(['git', 'init', '-q', str(fixture)], 'fixture-git-init')
+    run(['git', '-C', str(fixture), 'add', '.'], 'fixture-git-add')
+    run(['git', '-C', str(fixture), '-c', 'user.name=Runtime Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'Initial sample'], 'fixture-git-commit')
+    (fixture / 'main.js').write_text('export const greeting = "Hello from the modified fixture";\nexport const ready = true;\n', encoding='utf-8')
+    config = work / 'config.toml'
+    config.write_text('[session]\ncwd = ' + json.dumps(str(fixture)) + '\n[ui]\nlanguage = "en"\n', encoding='utf-8')
+    args += ['--config', str(config), '--layout', str(work / 'layout.json')]
+    web_server = subprocess.Popen(['python3', '-m', 'http.server', '8765', '--bind', '127.0.0.1', '--directory', str(fixture)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    app_env = dict(os.environ, HORIZYND_SOCKET=str(work / 'daemon.sock'), HORIZYND_TRANSCRIPTS=str(work / 'transcripts'))
     gui_log = (out / 'gui-process.log').open('wb')
-    gui = subprocess.Popen(args, cwd=fixture, stdout=gui_log, stderr=subprocess.STDOUT)
+    gui = subprocess.Popen(args, cwd=fixture, env=app_env, stdout=gui_log, stderr=subprocess.STDOUT)
     report['gui_pid'] = gui.pid
     report['gui_arguments'] = args[1:]
     print('Started original GUI PID', gui.pid, flush=True)
@@ -85,6 +97,44 @@ try:
         except Exception as exc:
             report['desktop_parse_error'] = str(exc)
     run(['screencapture', '-x', str(out / 'desktop.png')], 'capture-desktop', 15)
+    code, _ = run(['swiftc', 'ui.swift', '-o', str(work / 'ui')], 'compile-ui', 90)
+    if code == 0 and gui.poll() is None:
+        _, initial_ax = run([str(work / 'ui'), 'dump', str(gui.pid)], 'ax-initial')
+        def nodes(value):
+            if isinstance(value, dict):
+                yield value
+                for child in value.get('children', []):
+                    yield from nodes(child)
+        titles = [n.get('AXTitle', '') for n in nodes(json.loads(initial_ax).get('tree', {})) if n.get('AXRole') == 'AXMenuItem']
+        report['menu_titles'] = titles
+        print('Observed menu titles:', json.dumps(titles), flush=True)
+        def capture_state(label):
+            time.sleep(1)
+            _, raw = run([str(work / 'desktop')], 'state-' + label)
+            state = json.loads(raw)
+            windows = [w for w in state['windows'] if w.get('kCGWindowOwnerPID') == gui.pid and w.get('kCGWindowLayer') == 0]
+            report.setdefault('window_states', []).append({'label': label, 'count': len(windows), 'windows': windows})
+            for index, window in enumerate(windows[:4]):
+                run(['screencapture', '-x', '-l', str(window['kCGWindowNumber']), str(out / f'{label}-{index}.png')], f'capture-{label}-{index}', 15)
+            run([str(work / 'ui'), 'dump', str(gui.pid)], 'ax-' + label)
+        for label, choices in [
+            ('browser', ['Browser', 'Open Browser Sidebar', 'Browser Sidebar']),
+            ('files', ['Files', 'Open Files Sidebar', 'Files and Git']),
+            ('changes', ['Changes', 'Open Changes Sidebar']),
+            ('agent', ['Agent', 'Open Agent Sidebar', 'Agent Overview']),
+            ('split', ['Split Right']),
+            ('second-window', ['New Window']),
+            ('settings', ['Settings…', 'Settings...', 'Settings']),
+        ]:
+            _, raw = run([str(work / 'ui'), 'dump', str(gui.pid)], 'before-' + label)
+            current = [n.get('AXTitle', '') for n in nodes(json.loads(raw).get('tree', {})) if n.get('AXRole') == 'AXMenuItem']
+            found = next((choice for choice in choices if current.count(choice) == 1), None)
+            if found:
+                code, message = run([str(work / 'ui'), 'menu', str(gui.pid), found], 'action-' + label)
+                report.setdefault('ui_actions', []).append({'label': label, 'menu': found, 'returncode': code})
+                capture_state(label)
+            else:
+                report.setdefault('ui_actions', []).append({'label': label, 'skipped': 'No unique matching menu item'})
     run(['ps', '-axo', 'pid,ppid,comm'], 'processes')
     run(['log', 'show', '--last', '2m', '--style', 'compact', '--predicate', 'process == "horizyn" OR process == "horizynd"'], 'unified-log', 30)
     crashes = pathlib.Path.home() / 'Library/Logs/DiagnosticReports'
@@ -97,6 +147,8 @@ except Exception as exc:
     (out / 'exception.txt').write_text(traceback.format_exc(), encoding='utf-8')
     print(traceback.format_exc(), flush=True)
 finally:
+    if web_server and web_server.poll() is None:
+        web_server.terminate()
     if gui and gui.poll() is None:
         gui.terminate()
         try:
