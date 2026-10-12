@@ -5,6 +5,7 @@ import pathlib
 import platform
 import plistlib
 import shutil
+import shlex
 import subprocess
 import time
 import traceback
@@ -20,9 +21,9 @@ gui_log = None
 mount = work / 'mount'
 web_server = None
 
-def run(args, name, timeout=45):
+def run(args, name, timeout=45, env=None):
     try:
-        proc = subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=timeout)
+        proc = subprocess.run(args, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=timeout)
         content = proc.stdout.decode('utf-8', errors='replace')
         (out / (name + '.txt')).write_text(content, encoding='utf-8')
         report['commands'].append({'name': name, 'returncode': proc.returncode})
@@ -117,6 +118,24 @@ try:
             for index, window in enumerate(windows[:4]):
                 run(['screencapture', '-x', '-l', str(window['kCGWindowNumber']), str(out / f'{label}-{index}.png')], f'capture-{label}-{index}', 15)
             run([str(work / 'ui'), 'dump', str(gui.pid)], 'ax-' + label)
+        ui = [str(work / 'ui')]
+        command = 'cd ' + shlex.quote(str(fixture)) + '; printf ' + shlex.quote('\x1b]7;file://localhost' + str(fixture) + '\x07')
+        run(ui + ['type', str(gui.pid), command], 'fixture-terminal-type')
+        run(ui + ['key', str(gui.pid), '36', '0'], 'fixture-terminal-return')
+        capture_state('fixture-terminal')
+        if titles.count('Toggle Palette') == 1:
+            for label, query in [('browser', 'Open Browser Sidebar'), ('files', 'Open Files Sidebar'), ('changes', 'Open Changes Sidebar'), ('agent', 'Open Agent Sidebar')]:
+                run(ui + ['menu', str(gui.pid), 'Toggle Palette'], 'palette-open-' + label)
+                run(ui + ['type', str(gui.pid), query], 'palette-query-' + label)
+                capture_state('palette-' + label)
+                run(ui + ['key', str(gui.pid), '36', '0'], 'palette-select-' + label)
+                capture_state('panel-' + label)
+                if label == 'browser':
+                    run(ui + ['key', str(gui.pid), '37', '1048576'], 'browser-focus-address')
+                    run(ui + ['type', str(gui.pid), 'http://127.0.0.1:8765'], 'browser-type-address')
+                    run(ui + ['key', str(gui.pid), '36', '0'], 'browser-navigate')
+                    time.sleep(3)
+                    capture_state('browser-loaded')
         for label, choices in [
             ('browser', ['Browser', 'Open Browser Sidebar', 'Browser Sidebar']),
             ('files', ['Files', 'Open Files Sidebar', 'Files and Git']),
@@ -128,13 +147,19 @@ try:
         ]:
             _, raw = run([str(work / 'ui'), 'dump', str(gui.pid)], 'before-' + label)
             current = [n.get('AXTitle', '') for n in nodes(json.loads(raw).get('tree', {})) if n.get('AXRole') == 'AXMenuItem']
-            found = next((choice for choice in choices if current.count(choice) == 1), None)
+            found = next((choice for choice in choices if current.count(choice) == 1 or (label == 'second-window' and current.count(choice) > 0)), None)
             if found:
-                code, message = run([str(work / 'ui'), 'menu', str(gui.pid), found], 'action-' + label)
+                scope = ['File'] if label == 'second-window' else []
+                code, message = run([str(work / 'ui'), 'menu', str(gui.pid), found] + scope, 'action-' + label)
                 report.setdefault('ui_actions', []).append({'label': label, 'menu': found, 'returncode': code})
                 capture_state(label)
             else:
                 report.setdefault('ui_actions', []).append({'label': label, 'skipped': 'No unique matching menu item'})
+    recovery_env = dict(os.environ, HORIZYND_SOCKET=str(work / 'recovery-test.sock'), HORIZYND_TRANSCRIPTS=str(work / 'recovery-transcripts'))
+    report['crash_recovery_exit'], _ = run([str(executable), '--crash-recover-test'], 'original-crash-recover-test', 45, env=recovery_env)
+    layout = work / 'layout.json'
+    if layout.exists():
+        shutil.copy2(layout, out / 'observed-layout.json')
     run(['ps', '-axo', 'pid,ppid,comm'], 'processes')
     run(['log', 'show', '--last', '2m', '--style', 'compact', '--predicate', 'process == "horizyn" OR process == "horizynd"'], 'unified-log', 30)
     crashes = pathlib.Path.home() / 'Library/Logs/DiagnosticReports'

@@ -26,11 +26,12 @@ func dump(_ element: AXUIElement, _ depth: Int = 0) -> [String: Any] {
     if depth < 9 && visited < 1600 { node["children"] = children(element).map { dump($0, depth + 1) } }
     return node
 }
-func findMenu(_ element: AXUIElement, _ title: String, _ depth: Int = 0) -> [AXUIElement] {
+func findMenu(_ element: AXUIElement, _ title: String, _ scope: String? = nil, _ inside: Bool = false, _ depth: Int = 0) -> [AXUIElement] {
     if depth > 10 { return [] }
+    let active = scope == nil || inside || (string(element, kAXRoleAttribute) == kAXMenuBarItemRole && string(element, kAXTitleAttribute) == scope)
     var result: [AXUIElement] = []
-    if string(element, kAXRoleAttribute) == kAXMenuItemRole && string(element, kAXTitleAttribute) == title { result.append(element) }
-    for child in children(element) { result += findMenu(child, title, depth + 1) }
+    if active && string(element, kAXRoleAttribute) == kAXMenuItemRole && string(element, kAXTitleAttribute) == title { result.append(element) }
+    for child in children(element) { result += findMenu(child, title, scope, active, depth + 1) }
     return result
 }
 func emit(_ value: Any) {
@@ -42,7 +43,7 @@ case "dump":
     emit(["trusted": AXIsProcessTrusted(), "tree": dump(app)])
 case "menu":
     guard args.count >= 4 else { exit(2) }
-    let matches = findMenu(app, args[3])
+    let matches = findMenu(app, args[3], args.count > 4 ? args[4] : nil)
     guard matches.count == 1 else { emit(["error": "Menu title did not uniquely identify an item", "count": matches.count]); exit(3) }
     running.activate(options: [.activateIgnoringOtherApps])
     let status = AXUIElementPerformAction(matches[0], kAXPressAction as CFString)
