@@ -1,4 +1,5 @@
 import hashlib
+import http.server
 import json
 import os
 import pathlib
@@ -8,6 +9,7 @@ import shutil
 import shlex
 import subprocess
 import time
+import threading
 import traceback
 import urllib.request
 
@@ -79,9 +81,17 @@ try:
     config.write_text('[session]\ncwd = ' + json.dumps(str(fixture)) + '\n[ui]\nlanguage = "en"\n', encoding='utf-8')
     args += ['--config', str(config), '--layout', str(work / 'layout.json')]
     web_log = (out / 'fixture-http.log').open('wb')
-    web_server = subprocess.Popen(['python3', '-u', '-m', 'http.server', '8765', '--bind', '127.0.0.1', '--directory', str(fixture)], stdout=web_log, stderr=subprocess.STDOUT)
-    time.sleep(1)
-    with urllib.request.urlopen('http://127.0.0.1:8765', timeout=5) as response:
+    class FixtureHandler(http.server.SimpleHTTPRequestHandler):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, directory=str(fixture), **kwargs)
+        def log_message(self, fmt, *args):
+            web_log.write((fmt % args + '\n').encode('utf-8', errors='replace'))
+            web_log.flush()
+    web_server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), FixtureHandler)
+    threading.Thread(target=web_server.serve_forever, daemon=True).start()
+    test_url = f'http://127.0.0.1:{web_server.server_port}/'
+    direct_http = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    with direct_http.open(test_url, timeout=5) as response:
         report['local_http_preflight'] = {'status': response.status, 'fixture_title_found': b'Horizyn 0.1.35 browser fixture' in response.read()}
     app_env = dict(os.environ, HORIZYND_SOCKET=str(work / 'daemon.sock'), HORIZYND_TRANSCRIPTS=str(work / 'transcripts'))
     gui_log = (out / 'gui-process.log').open('wb')
@@ -136,13 +146,14 @@ try:
                     bounds = candidates[0]['kCGWindowBounds']
                     run(ui + ['click', str(gui.pid), str(bounds['X'] + 330), str(bounds['Y'] + 220)], 'focus-terminal-' + label)
                 run(ui + ['menu', str(gui.pid), 'Toggle Palette'], 'palette-open-' + label)
+                run(ui + ['key', str(gui.pid), '0', '1048576'], 'palette-select-all-' + label)
                 run(ui + ['type', str(gui.pid), query], 'palette-query-' + label)
                 capture_state('palette-' + label)
                 run(ui + ['key', str(gui.pid), '36', '0'], 'palette-select-' + label)
                 capture_state('panel-' + label)
                 if label == 'browser':
                     run(ui + ['key', str(gui.pid), '37', '1048576'], 'browser-focus-address')
-                    run(ui + ['type', str(gui.pid), 'http://127.0.0.1:8765'], 'browser-type-address')
+                    run(ui + ['type', str(gui.pid), test_url], 'browser-type-address')
                     run(ui + ['key', str(gui.pid), '36', '0'], 'browser-navigate')
                     time.sleep(20)
                     capture_state('browser-loaded')
@@ -183,8 +194,9 @@ except Exception as exc:
     (out / 'exception.txt').write_text(traceback.format_exc(), encoding='utf-8')
     print(traceback.format_exc(), flush=True)
 finally:
-    if web_server and web_server.poll() is None:
-        web_server.terminate()
+    if web_server:
+        web_server.shutdown()
+        web_server.server_close()
     if web_log:
         web_log.close()
     if gui and gui.poll() is None:
