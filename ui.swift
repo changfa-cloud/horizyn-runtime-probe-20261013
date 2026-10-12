@@ -70,6 +70,17 @@ case "type":
         event.postToPid(pid)
     }
     emit(["typedCharacters": units.count])
+case "click":
+    guard args.count >= 5, let x = Double(args[3]), let y = Double(args[4]) else { exit(2) }
+    running.activate(options: [])
+    usleep(200_000)
+    let point = CGPoint(x: x, y: y)
+    for kind in [CGEventType.mouseMoved, .leftMouseDown, .leftMouseUp] {
+        let event = CGEvent(mouseEventSource: nil, mouseType: kind, mouseCursorPosition: point, mouseButton: .left)!
+        event.post(tap: .cghidEventTap)
+        usleep(60_000)
+    }
+    emit(["x": x, "y": y])
 default:
     exit(2)
 }

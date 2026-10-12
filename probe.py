@@ -20,6 +20,7 @@ gui = None
 gui_log = None
 mount = work / 'mount'
 web_server = None
+web_log = None
 
 def run(args, name, timeout=45, env=None):
     try:
@@ -77,7 +78,11 @@ try:
     config = work / 'config.toml'
     config.write_text('[session]\ncwd = ' + json.dumps(str(fixture)) + '\n[ui]\nlanguage = "en"\n', encoding='utf-8')
     args += ['--config', str(config), '--layout', str(work / 'layout.json')]
-    web_server = subprocess.Popen(['python3', '-m', 'http.server', '8765', '--bind', '127.0.0.1', '--directory', str(fixture)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    web_log = (out / 'fixture-http.log').open('wb')
+    web_server = subprocess.Popen(['python3', '-u', '-m', 'http.server', '8765', '--bind', '127.0.0.1', '--directory', str(fixture)], stdout=web_log, stderr=subprocess.STDOUT)
+    time.sleep(1)
+    with urllib.request.urlopen('http://127.0.0.1:8765', timeout=5) as response:
+        report['local_http_preflight'] = {'status': response.status, 'fixture_title_found': b'Horizyn 0.1.35 browser fixture' in response.read()}
     app_env = dict(os.environ, HORIZYND_SOCKET=str(work / 'daemon.sock'), HORIZYND_TRANSCRIPTS=str(work / 'transcripts'))
     gui_log = (out / 'gui-process.log').open('wb')
     gui = subprocess.Popen(args, cwd=fixture, env=app_env, stdout=gui_log, stderr=subprocess.STDOUT)
@@ -119,12 +124,17 @@ try:
                 run(['screencapture', '-x', '-l', str(window['kCGWindowNumber']), str(out / f'{label}-{index}.png')], f'capture-{label}-{index}', 15)
             run([str(work / 'ui'), 'dump', str(gui.pid)], 'ax-' + label)
         ui = [str(work / 'ui')]
-        command = 'cd ' + shlex.quote(str(fixture)) + '; printf ' + shlex.quote('\x1b]7;file://localhost' + str(fixture) + '\x07')
+        command = 'cd ' + shlex.quote(str(fixture)) + '; printf ' + shlex.quote('\\033]7;file://localhost' + str(fixture) + '\\007')
         run(ui + ['type', str(gui.pid), command], 'fixture-terminal-type')
         run(ui + ['key', str(gui.pid), '36', '0'], 'fixture-terminal-return')
         capture_state('fixture-terminal')
         if titles.count('Toggle Palette') == 1:
             for label, query in [('browser', 'Open Browser Sidebar'), ('files', 'Open Files Sidebar'), ('changes', 'Open Changes Sidebar'), ('agent', 'Open Agent Sidebar')]:
+                _, observed = run([str(work / 'desktop')], 'focus-state-' + label)
+                candidates = [w for w in json.loads(observed)['windows'] if w.get('kCGWindowOwnerPID') == gui.pid and w.get('kCGWindowLayer') == 0]
+                if candidates:
+                    bounds = candidates[0]['kCGWindowBounds']
+                    run(ui + ['click', str(gui.pid), str(bounds['X'] + 330), str(bounds['Y'] + 220)], 'focus-terminal-' + label)
                 run(ui + ['menu', str(gui.pid), 'Toggle Palette'], 'palette-open-' + label)
                 run(ui + ['type', str(gui.pid), query], 'palette-query-' + label)
                 capture_state('palette-' + label)
@@ -134,8 +144,9 @@ try:
                     run(ui + ['key', str(gui.pid), '37', '1048576'], 'browser-focus-address')
                     run(ui + ['type', str(gui.pid), 'http://127.0.0.1:8765'], 'browser-type-address')
                     run(ui + ['key', str(gui.pid), '36', '0'], 'browser-navigate')
-                    time.sleep(3)
+                    time.sleep(20)
                     capture_state('browser-loaded')
+                report.setdefault('palette_actions', []).append({'label': label, 'query': query, 'evidence': 'panel-' + label + '-0.png'})
         for label, choices in [
             ('browser', ['Browser', 'Open Browser Sidebar', 'Browser Sidebar']),
             ('files', ['Files', 'Open Files Sidebar', 'Files and Git']),
@@ -161,7 +172,7 @@ try:
     if layout.exists():
         shutil.copy2(layout, out / 'observed-layout.json')
     run(['ps', '-axo', 'pid,ppid,comm'], 'processes')
-    run(['log', 'show', '--last', '2m', '--style', 'compact', '--predicate', 'process == "horizyn" OR process == "horizynd"'], 'unified-log', 30)
+    run(['log', 'show', '--last', '10m', '--style', 'compact', '--predicate', 'process == "horizyn" OR process == "horizynd" OR process CONTAINS "WebKit"'], 'unified-log', 30)
     crashes = pathlib.Path.home() / 'Library/Logs/DiagnosticReports'
     if crashes.exists():
         for path in crashes.glob('horizyn*'):
@@ -174,6 +185,8 @@ except Exception as exc:
 finally:
     if web_server and web_server.poll() is None:
         web_server.terminate()
+    if web_log:
+        web_log.close()
     if gui and gui.poll() is None:
         gui.terminate()
         try:
